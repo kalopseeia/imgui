@@ -5367,6 +5367,27 @@ void ImGui::StopMouseMovingWindow()
     g.MovingWindow = NULL;
 }
 
+#ifdef __linux__
+static ImVec2 GetDesktopDimensions()
+{
+    ImVec2 max(-FLT_MAX, -FLT_MAX);
+    const ImGuiPlatformIO &platform_io = ImGui::GetPlatformIO();
+
+    for (int i = 0; i < platform_io.Monitors.Size; ++i)
+    {
+        const ImGuiPlatformMonitor &monitor = platform_io.Monitors[i];
+        const ImVec2 end = monitor.WorkPos + monitor.WorkSize;
+
+        if (end.x > max.x)
+            max.x = end.x;
+        if (end.y > max.y)
+            max.y = end.y;
+    }
+
+    return max;
+}
+#endif
+
 // Handle mouse moving window
 // Note: moving window with the navigation keys (Square + d-pad / Ctrl+Tab + Arrows) are processed in NavUpdateWindowing()
 // FIXME: We don't have strong guarantee that g.MovingWindow stay synced with g.ActiveId == g.MovingWindow->MoveId.
@@ -5374,18 +5395,56 @@ void ImGui::StopMouseMovingWindow()
 // but if we should more thoroughly test cases where g.ActiveId or g.MovingWindow gets changed and not the other.
 void ImGui::UpdateMouseMovingWindowNewFrame()
 {
-    ImGuiContext& g = *GImGui;
+    ImGuiContext &g = *GImGui;
     if (g.MovingWindow != NULL)
     {
         // We actually want to move the root window. g.MovingWindow == window we clicked on (could be a child window).
         // We track it to preserve Focus and so that generally ActiveIdWindow == MovingWindow and ActiveId == MovingWindow->MoveId for consistency.
         KeepAliveID(g.ActiveId);
-        IM_ASSERT(g.MovingWindow && g.MovingWindow->RootWindow);
-        ImGuiWindow* moving_window = g.MovingWindow->RootWindow;
-        if (g.IO.MouseDown[0] && IsMousePosValid(&g.IO.MousePos))
+        IM_ASSERT(g.MovingWindow && g.MovingWindow->RootWindowDockTree);
+        ImGuiWindow *moving_window = g.MovingWindow->RootWindowDockTree;
+
+        // When a window stop being submitted while being dragged, it may will its viewport until next Begin()
+        const bool window_disappeared = (!moving_window->WasActive && !moving_window->Active);
+        if (g.IO.MouseDown[0] && IsMousePosValid(&g.IO.MousePos) && !window_disappeared)
         {
+// ImVec2 pos = g.IO.MousePos - g.ActiveIdClickOffset;
+#ifdef __linux__
+            static bool is_dragging = false;
+            static ImVec2 pos(0.0f, 0.0f);
+
+            if (g.IO.MouseReleased[0])
+                is_dragging = false;
+
+            if (!is_dragging)
+            {
+                pos = g.IO.MousePos - g.ActiveIdClickOffset;
+                is_dragging = true;
+            }
+            else
+            {
+                pos += g.IO.MouseDelta;
+            }
+
+            const ImVec2 desktop = GetDesktopDimensions();
+
+            const float max_x = desktop.x - moving_window->Rect().GetWidth();
+            const float max_y = desktop.y - moving_window->Rect().GetHeight();
+
+            pos.x = ImClamp(pos.x, 0.0f, max_x);
+            pos.y = ImClamp(pos.y, 0.0f, max_y);
+#else
             ImVec2 pos = g.IO.MousePos - g.ActiveIdClickOffset;
-            SetWindowPos(moving_window, pos, ImGuiCond_Always);
+#endif
+            if (moving_window->Pos.x != pos.x || moving_window->Pos.y != pos.y)
+            {
+                SetWindowPos(moving_window, pos, ImGuiCond_Always);
+                if (moving_window->Viewport && moving_window->ViewportOwned) // Synchronize viewport immediately because some overlays may relies on clipping rectangle before we Begin() into the window.
+                {
+                    moving_window->Viewport->Pos = pos;
+                    moving_window->Viewport->UpdateWorkRect();
+                }
+            }
             FocusWindow(g.MovingWindow);
         }
         else
